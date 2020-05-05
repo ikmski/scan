@@ -5,6 +5,7 @@ import (
 	"net"
 	"regexp"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/urfave/cli/v2"
@@ -34,12 +35,18 @@ func scanPorts(host string, startPort int, endPort int, udp bool) {
 		network = "udp"
 	}
 
+	var wg sync.WaitGroup
 	for port := startPort; port <= endPort; port++ {
-		ok := scan(host, port, network)
-		if ok {
-			fmt.Printf("opening %d/%s port.\n", port, network)
-		}
+		wg.Add(1)
+		go func(h string, p int, n string) {
+			ok := scan(h, p, n)
+			if ok {
+				fmt.Printf("opening %d/%s port.\n", p, n)
+			}
+			wg.Done()
+		}(host, port, network)
 	}
+	wg.Wait()
 }
 
 func scanSpecificPort(host string, port int, udp bool) {
