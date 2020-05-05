@@ -3,6 +3,9 @@ package main
 import (
 	"fmt"
 	"net"
+	"regexp"
+	"strconv"
+	"time"
 
 	"github.com/urfave/cli/v2"
 )
@@ -15,16 +18,28 @@ var (
 func scan(host string, port int, network string) bool {
 
 	address := fmt.Sprintf("%s:%d", host, port)
-	_, err := net.Dial(network, address)
+	conn, err := net.DialTimeout(network, address, time.Duration(1)*time.Second)
 	if err != nil {
 		return false
 	}
+	conn.Close()
 
 	return true
 }
 
-func scanPorts() {
+func scanPorts(host string, startPort int, endPort int, udp bool) {
 
+	network := "tcp"
+	if udp {
+		network = "udp"
+	}
+
+	for port := startPort; port <= endPort; port++ {
+		ok := scan(host, port, network)
+		if ok {
+			fmt.Printf("opening %d/%s port.\n", port, network)
+		}
+	}
 }
 
 func scanSpecificPort(host string, port int, udp bool) {
@@ -55,8 +70,34 @@ func mainAction(c *cli.Context) error {
 	if c.IsSet("port") {
 		port := c.Int("port")
 		scanSpecificPort(host, port, udp)
+		return nil
 	}
 
+	var startPort int
+	var endPort int
+	if c.IsSet("port-range") {
+		regex := regexp.MustCompile(`(\d*)\-(\d*)`)
+		match := regex.FindStringSubmatch(c.String("port-range"))
+		if match != nil && len(match) == 3 {
+			if len(match[1]) > 0 {
+				startPort, _ = strconv.Atoi(match[1])
+			}
+			if len(match[2]) > 0 {
+				endPort, _ = strconv.Atoi(match[2])
+			}
+		}
+
+		if startPort > 0 && endPort >= startPort {
+			scanPorts(host, startPort, endPort, udp)
+			return nil
+		} else {
+			return fmt.Errorf("Error: %s", "invalid format for port tange.")
+		}
+	}
+
+	startPort = 1
+	endPort = 1023
+	scanPorts(host, startPort, endPort, udp)
 	return nil
 }
 
