@@ -16,52 +16,141 @@ var (
 	revision string
 )
 
-func scan(host string, port int, network string) bool {
+type portStatus int
 
+const (
+	closed portStatus = iota
+	open
+)
+
+type protocol int
+
+const (
+	tcp protocol = iota
+	udp
+)
+
+type scanRequest struct {
+	host  string
+	port  int
+	proto protocol
+}
+
+type scanResult struct {
+	host   string
+	port   int
+	proto  protocol
+	status portStatus
+}
+
+func (p protocol) toString() string {
+	if p == tcp {
+		return "tcp"
+	}
+	return "udp"
+}
+
+func scanTCP(host string, port int) scanResult {
+
+	result := scanResult{
+		host:  host,
+		port:  port,
+		proto: tcp,
+	}
 	address := fmt.Sprintf("%s:%d", host, port)
-	conn, err := net.DialTimeout(network, address, time.Duration(1)*time.Second)
+	conn, err := net.DialTimeout("tcp", address, time.Duration(1)*time.Second)
 	if err != nil {
-		return false
+		return result
 	}
 	conn.Close()
 
-	return true
+	result.status = open
+	return result
 }
 
-func scanPorts(host string, startPort int, endPort int, udp bool) {
+func scanUDP(host string, port int) scanResult {
 
-	network := "tcp"
-	if udp {
-		network = "udp"
+	result := scanResult{
+		host:  host,
+		port:  port,
+		proto: udp,
 	}
+	address := &net.UDPAddr{
+		IP:   net.ParseIP(host),
+		Port: port,
+	}
+
+	conn, err := net.DialUDP("udp", nil, address)
+	if err != nil {
+		return result
+	}
+	conn.Close()
+
+	result.status = open
+	return result
+}
+
+func scan(req <-chan scanRequest, res chan<- scanResult, wg *sync.WaitGroup) {
+
+	for r := range req {
+
+		if r.proto == tcp {
+			res <- scanTCP(r.host, r.port)
+		} else {
+			res <- scanUDP(r.host, r.port)
+		}
+		wg.Done()
+	}
+}
+
+func listen(res <-chan scanResult) {
+
+	for r := range res {
+		if r.status == open {
+			fmt.Printf("opening %d/%s port.\n", r.port, r.proto.toString())
+		}
+	}
+}
+
+func scanPorts(host string, startPort int, endPort int, isUDP bool) {
+
+	//var results []scanResult
+	req := make(chan scanRequest)
+	defer close(req)
+	res := make(chan scanResult)
+	defer close(res)
 
 	var wg sync.WaitGroup
+
+	// worker
+	worker := 100
+	if endPort-startPort+1 < worker {
+		worker = endPort - startPort + 1
+	}
+
+	for i := 0; i < worker; i++ {
+		go scan(req, res, &wg)
+	}
+	go listen(res)
+
 	for port := startPort; port <= endPort; port++ {
+
+		request := scanRequest{
+			host:  host,
+			port:  port,
+			proto: tcp,
+		}
+		if isUDP {
+			request.proto = udp
+		}
+
 		wg.Add(1)
-		go func(h string, p int, n string) {
-			ok := scan(h, p, n)
-			if ok {
-				fmt.Printf("opening %d/%s port.\n", p, n)
-			}
-			wg.Done()
-		}(host, port, network)
+		go func(r scanRequest) {
+			req <- r
+		}(request)
 	}
+
 	wg.Wait()
-}
-
-func scanSpecificPort(host string, port int, udp bool) {
-
-	network := "tcp"
-	if udp {
-		network = "udp"
-	}
-
-	ok := scan(host, port, network)
-	if ok {
-		fmt.Printf("opening %d/%s port.\n", port, network)
-	} else {
-		fmt.Printf("%d/%s port is closed.\n", port, network)
-	}
 }
 
 func mainAction(c *cli.Context) error {
@@ -72,40 +161,56 @@ func mainAction(c *cli.Context) error {
 	}
 
 	host := args.First()
-	udp := c.Bool("udp")
-
-	if c.IsSet("port") {
-		port := c.Int("port")
-		scanSpecificPort(host, port, udp)
-		return nil
-	}
+	isUDP := c.Bool("udp")
 
 	var startPort int
 	var endPort int
-	if c.IsSet("port-range") {
-		regex := regexp.MustCompile(`(\d*)\-(\d*)`)
-		match := regex.FindStringSubmatch(c.String("port-range"))
-		if match != nil && len(match) == 3 {
-			if len(match[1]) > 0 {
-				startPort, _ = strconv.Atoi(match[1])
-			}
-			if len(match[2]) > 0 {
-				endPort, _ = strconv.Atoi(match[2])
-			}
+	if c.IsSet("port") {
+		startPort, endPort, err := parsePort(c.String("port"))
+		if err != nil {
+			return err
 		}
-
-		if startPort > 0 && endPort >= startPort {
-			scanPorts(host, startPort, endPort, udp)
-			return nil
-		} else {
-			return fmt.Errorf("Error: %s", "invalid format for port tange.")
-		}
+		scanPorts(host, startPort, endPort, isUDP)
+		return nil
 	}
 
 	startPort = 1
 	endPort = 1023
-	scanPorts(host, startPort, endPort, udp)
+	scanPorts(host, startPort, endPort, isUDP)
 	return nil
+}
+
+func parsePort(str string) (start int, end int, err error) {
+
+	regex := regexp.MustCompile(`(\d*)\-(\d*)`)
+	match := regex.FindStringSubmatch(str)
+	if match != nil && len(match) == 3 {
+		if len(match[1]) > 0 {
+			start, _ = strconv.Atoi(match[1])
+		}
+		if len(match[2]) > 0 {
+			end, _ = strconv.Atoi(match[2])
+		}
+
+		if start > 0 && end >= start {
+			return
+		}
+	}
+
+	regex = regexp.MustCompile(`(\d*)`)
+	match = regex.FindStringSubmatch(str)
+	if match != nil && len(match) == 2 {
+		if len(match[1]) > 0 {
+			start, _ = strconv.Atoi(match[1])
+			end = start
+		}
+
+		if start > 0 {
+			return
+		}
+	}
+
+	return 0, 0, fmt.Errorf("Error: %s", "invalid format for port tange.")
 }
 
 func main() {
@@ -119,20 +224,14 @@ func main() {
 	app.HideHelpCommand = true
 
 	app.Flags = []cli.Flag{
-		&cli.IntFlag{
+		&cli.StringFlag{
 			Name:    "port",
 			Aliases: []string{"p"},
-			Usage:   "port number",
-		},
-		&cli.StringFlag{
-			Name:    "port-range",
-			Aliases: []string{"r"},
-			Usage:   "port range. ex) 1-1023",
+			Usage:   "port number. ex) 22, 1-1023",
 		},
 		&cli.BoolFlag{
-			Name:    "udp",
-			Aliases: []string{"u"},
-			Usage:   "scan udp ports",
+			Name:  "udp",
+			Usage: "scan udp ports",
 		},
 	}
 
