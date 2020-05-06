@@ -53,16 +53,17 @@ func (p protocol) toString() string {
 func scanTCP(host string, port int) scanResult {
 
 	result := scanResult{
-		host:  host,
-		port:  port,
-		proto: tcp,
+		host:   host,
+		port:   port,
+		proto:  tcp,
+		status: closed,
 	}
 	address := fmt.Sprintf("%s:%d", host, port)
 	conn, err := net.DialTimeout("tcp", address, time.Duration(1)*time.Second)
 	if err != nil {
 		return result
 	}
-	conn.Close()
+	defer conn.Close()
 
 	result.status = open
 	return result
@@ -71,9 +72,10 @@ func scanTCP(host string, port int) scanResult {
 func scanUDP(host string, port int) scanResult {
 
 	result := scanResult{
-		host:  host,
-		port:  port,
-		proto: udp,
+		host:   host,
+		port:   port,
+		proto:  udp,
+		status: closed,
 	}
 	address := &net.UDPAddr{
 		IP:   net.ParseIP(host),
@@ -84,7 +86,18 @@ func scanUDP(host string, port int) scanResult {
 	if err != nil {
 		return result
 	}
-	conn.Close()
+	defer conn.Close()
+
+	count := 0
+	for i := 0; i < 10; i++ {
+		_, err = conn.Write([]byte{0xFF})
+		if err != nil {
+			count++
+		}
+	}
+	if count > 0 {
+		return result
+	}
 
 	result.status = open
 	return result
@@ -114,13 +127,12 @@ func listen(res <-chan scanResult) {
 
 func scanPorts(host string, startPort int, endPort int, isUDP bool) {
 
-	//var results []scanResult
 	req := make(chan scanRequest)
-	defer close(req)
 	res := make(chan scanResult)
-	defer close(res)
 
 	var wg sync.WaitGroup
+
+	go listen(res)
 
 	// worker
 	worker := 100
@@ -131,7 +143,6 @@ func scanPorts(host string, startPort int, endPort int, isUDP bool) {
 	for i := 0; i < worker; i++ {
 		go scan(req, res, &wg)
 	}
-	go listen(res)
 
 	for port := startPort; port <= endPort; port++ {
 
@@ -151,6 +162,11 @@ func scanPorts(host string, startPort int, endPort int, isUDP bool) {
 	}
 
 	wg.Wait()
+
+	close(req)
+	time.Sleep(1 * time.Second)
+	close(res)
+	time.Sleep(1 * time.Second)
 }
 
 func mainAction(c *cli.Context) error {
